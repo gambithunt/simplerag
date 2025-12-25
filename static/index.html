@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SimpleRAG - Local Document Search</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+    <div x-data="ragApp()" x-init="init()" class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-blue-600 text-white shadow-lg">
+            <div class="container mx-auto px-4 py-6">
+                <h1 class="text-3xl font-bold">🔍 SimpleRAG</h1>
+                <p class="text-blue-100">Local Document Search & Chat</p>
+            </div>
+        </header>
+
+        <div class="container mx-auto px-4 py-8">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                
+                <!-- Left Sidebar - Document Management -->
+                <div class="lg:col-span-1">
+                    <div class="bg-white rounded-lg shadow-md p-6">
+                        <h2 class="text-xl font-bold mb-4">📚 Documents</h2>
+                        
+                        <!-- Upload Section -->
+                        <div class="mb-6">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                Upload Document
+                            </label>
+                            <input 
+                                type="file" 
+                                @change="handleFileSelect"
+                                accept=".pdf,.docx,.doc,.txt,.md,.xlsx,.xls"
+                                class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                            />
+                            <button 
+                                @click="uploadFile" 
+                                :disabled="!selectedFile || uploading"
+                                class="mt-2 w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                            >
+                                <span x-show="!uploading">Upload</span>
+                                <span x-show="uploading">Uploading...</span>
+                            </button>
+                        </div>
+
+                        <!-- Scan Folder -->
+                        <div class="mb-6 border-t pt-4">
+                            <button 
+                                @click="scanFolder" 
+                                :disabled="scanning"
+                                class="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 disabled:bg-gray-400"
+                            >
+                                <span x-show="!scanning">🔄 Scan Folder</span>
+                                <span x-show="scanning">Scanning...</span>
+                            </button>
+                            <p class="text-xs text-gray-500 mt-2">
+                                Scans ./documents_to_scan for new files
+                            </p>
+                        </div>
+
+                        <!-- Document List -->
+                        <div class="border-t pt-4">
+                            <h3 class="font-semibold mb-3">Available Documents</h3>
+                            <div class="space-y-2 max-h-96 overflow-y-auto">
+                                <template x-for="doc in documents" :key="doc.id">
+                                    <div class="bg-gray-50 p-3 rounded-md text-sm">
+                                        <div class="flex justify-between items-start">
+                                            <div class="flex-1">
+                                                <p class="font-medium text-gray-800" x-text="doc.filename"></p>
+                                                <p class="text-xs text-gray-500" x-text="formatFileSize(doc.file_size_bytes)"></p>
+                                                <span class="inline-block px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded mt-1" x-text="doc.classification"></span>
+                                            </div>
+                                            <button 
+                                                @click="deleteDocument(doc.id)"
+                                                class="text-red-500 hover:text-red-700 ml-2"
+                                                title="Delete"
+                                            >
+                                                🗑️
+                                            </button>
+                                        </div>
+                                    </div>
+                                </template>
+                                <div x-show="documents.length === 0" class="text-gray-500 text-center py-4">
+                                    No documents yet
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Main Chat Area -->
+                <div class="lg:col-span-2">
+                    <div class="bg-white rounded-lg shadow-md p-6 h-[calc(100vh-12rem)]">
+                        <h2 class="text-xl font-bold mb-4">💬 Chat</h2>
+                        
+                        <!-- Messages -->
+                        <div class="flex flex-col h-[calc(100%-8rem)]">
+                            <div class="flex-1 overflow-y-auto space-y-4 mb-4 pr-2" x-ref="messagesContainer">
+                                <template x-for="message in messages" :key="message.id">
+                                    <div :class="message.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
+                                        <div :class="message.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-800'" 
+                                             class="max-w-[80%] rounded-lg p-4">
+                                            <p class="text-sm font-semibold mb-1" x-text="message.role === 'user' ? 'You' : 'Assistant'"></p>
+                                            <p class="whitespace-pre-wrap" x-text="message.content"></p>
+                                            
+                                            <!-- Sources -->
+                                            <template x-if="message.sources && message.sources.length > 0">
+                                                <div class="mt-3 pt-3 border-t border-gray-300">
+                                                    <p class="text-xs font-semibold mb-2">📎 Sources:</p>
+                                                    <template x-for="source in message.sources" :key="source.document_id">
+                                                        <div class="text-xs bg-white/10 p-2 rounded mb-1">
+                                                            <p class="font-medium" x-text="source.filename"></p>
+                                                            <p class="text-gray-300 mt-1" x-text="source.chunk_text"></p>
+                                                            <p class="text-gray-400 text-[10px] mt-1">
+                                                                Relevance: <span x-text="(source.relevance_score * 100).toFixed(1) + '%'"></span>
+                                                            </p>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </template>
+                                            
+                                            <template x-if="message.response_time_ms">
+                                                <p class="text-xs mt-2 opacity-70" x-text="'(' + message.response_time_ms + 'ms)'"></p>
+                                            </template>
+                                        </div>
+                                    </div>
+                                </template>
+                                
+                                <div x-show="messages.length === 0" class="text-center text-gray-400 py-12">
+                                    <p class="text-lg mb-2">👋 Welcome to SimpleRAG!</p>
+                                    <p class="text-sm">Upload documents and start asking questions</p>
+                                </div>
+                            </div>
+
+                            <!-- Input Area -->
+                            <div class="border-t pt-4">
+                                <form @submit.prevent="sendMessage" class="flex gap-2">
+                                    <input 
+                                        type="text" 
+                                        x-model="currentQuery"
+                                        placeholder="Ask a question about your documents..."
+                                        :disabled="querying || documents.length === 0"
+                                        class="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100"
+                                    />
+                                    <button 
+                                        type="submit"
+                                        :disabled="!currentQuery.trim() || querying || documents.length === 0"
+                                        class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
+                                    >
+                                        <span x-show="!querying">Send</span>
+                                        <span x-show="querying">...</span>
+                                    </button>
+                                </form>
+                                <div x-show="documents.length === 0" class="text-xs text-gray-500 mt-2">
+                                    Please upload documents before asking questions
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast Notifications -->
+        <div x-show="toast.show" 
+             x-transition
+             class="fixed bottom-4 right-4 px-6 py-4 rounded-lg shadow-lg max-w-md"
+             :class="toast.type === 'success' ? 'bg-green-500' : toast.type === 'error' ? 'bg-red-500' : 'bg-blue-500'"
+        >
+            <p class="text-white" x-text="toast.message"></p>
+        </div>
+    </div>
+
+    <script>
+        function ragApp() {
+            return {
+                documents: [],
+                messages: [],
+                currentQuery: '',
+                selectedFile: null,
+                uploading: false,
+                scanning: false,
+                querying: false,
+                toast: {
+                    show: false,
+                    message: '',
+                    type: 'info'
+                },
+
+                async init() {
+                    await this.loadDocuments();
+                },
+
+                handleFileSelect(event) {
+                    this.selectedFile = event.target.files[0];
+                },
+
+                async uploadFile() {
+                    if (!this.selectedFile) return;
+
+                    this.uploading = true;
+                    const formData = new FormData();
+                    formData.append('file', this.selectedFile);
+                    formData.append('classification', 'internal');
+
+                    try {
+                        const response = await fetch('/api/upload', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        if (response.ok) {
+                            this.showToast('Document uploaded successfully!', 'success');
+                            await this.loadDocuments();
+                            this.selectedFile = null;
+                            event.target.value = '';
+                        } else {
+                            const error = await response.json();
+                            this.showToast('Upload failed: ' + (error.detail || 'Unknown error'), 'error');
+                        }
+                    } catch (error) {
+                        this.showToast('Upload failed: ' + error.message, 'error');
+                    } finally {
+                        this.uploading = false;
+                    }
+                },
+
+                async scanFolder() {
+                    this.scanning = true;
+                    try {
+                        const response = await fetch('/api/scan', {
+                            method: 'POST'
+                        });
+
+                        if (response.ok) {
+                            const result = await response.json();
+                            this.showToast(`Scanned: ${result.files_processed}/${result.files_found} files processed`, 'success');
+                            if (result.errors.length > 0) {
+                                console.warn('Scan errors:', result.errors);
+                            }
+                            await this.loadDocuments();
+                        } else {
+                            this.showToast('Scan failed', 'error');
+                        }
+                    } catch (error) {
+                        this.showToast('Scan failed: ' + error.message, 'error');
+                    } finally {
+                        this.scanning = false;
+                    }
+                },
+
+                async loadDocuments() {
+                    try {
+                        const response = await fetch('/api/documents');
+                        if (response.ok) {
+                            this.documents = await response.json();
+                        }
+                    } catch (error) {
+                        console.error('Failed to load documents:', error);
+                    }
+                },
+
+                async deleteDocument(id) {
+                    if (!confirm('Are you sure you want to delete this document?')) return;
+
+                    try {
+                        const response = await fetch(`/api/documents/${id}`, {
+                            method: 'DELETE'
+                        });
+
+                        if (response.ok) {
+                            this.showToast('Document deleted', 'success');
+                            await this.loadDocuments();
+                        } else {
+                            this.showToast('Delete failed', 'error');
+                        }
+                    } catch (error) {
+                        this.showToast('Delete failed: ' + error.message, 'error');
+                    }
+                },
+
+                async sendMessage() {
+                    if (!this.currentQuery.trim() || this.querying) return;
+
+                    const userMessage = {
+                        id: Date.now(),
+                        role: 'user',
+                        content: this.currentQuery
+                    };
+
+                    this.messages.push(userMessage);
+                    const query = this.currentQuery;
+                    this.currentQuery = '';
+                    this.querying = true;
+
+                    setTimeout(() => {
+                        this.$refs.messagesContainer.scrollTop = this.$refs.messagesContainer.scrollHeight;
+                    }, 100);
+
+                    try {
+                        const response = await fetch('/api/query', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                question: query,
+                                top_k: 5
+                            })
+                        });
+
+                        if (response.ok) {
+                            const result = await response.json();
+                            this.messages.push({
+                                id: Date.now(),
+                                role: 'assistant',
+                                content: result.answer,
+                                sources: result.sources,
+                                response_time_ms: result.response_time_ms
+                            });
+
+                            setTimeout(() => {
+                                this.$refs.messagesContainer.scrollTop = this.$refs.messagesContainer.scrollHeight;
+                            }, 100);
+                        } else {
+                            this.showToast('Query failed', 'error');
+                        }
+                    } catch (error) {
+                        this.showToast('Query failed: ' + error.message, 'error');
+                    } finally {
+                        this.querying = false;
+                    }
+                },
+
+                formatFileSize(bytes) {
+                    if (bytes < 1024) return bytes + ' B';
+                    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+                    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+                },
+
+                showToast(message, type = 'info') {
+                    this.toast = { show: true, message, type };
+                    setTimeout(() => {
+                        this.toast.show = false;
+                    }, 3000);
+                }
+            };
+        }
+    </script>
+</body>
+</html>

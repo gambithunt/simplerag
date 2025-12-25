@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.env.local
+.venv
+venv/
+env/
+ENV/
+
+chroma_db/
+uploads/
+documents_to_scan/
+
+*.sqlite3
+*.db
+
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+logs/
+*.log
+
+# Docker
+*.tar.gz
+backup*.sql
+
+# Keep directory structure but ignore contents
+!uploads/.gitkeep
+!documents_to_scan/.gitkeep
+!chroma_db/.gitkeep
