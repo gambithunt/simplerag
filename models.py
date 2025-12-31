@@ -20,19 +20,6 @@ class Document(Base):
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
 
-class DocumentChunk(Base):
-    __tablename__ = "document_chunks"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
-    chunk_index = Column(Integer, nullable=False)
-    text = Column(Text, nullable=False)
-    word_count = Column(Integer)
-    classification = Column(String(50), default="internal")
-    metadata_json = Column(JSON)
-    created_at = Column(TIMESTAMP, server_default=func.now())
-
-
 class QueryAuditLog(Base):
     __tablename__ = "query_audit_log"
     

@@ -10,6 +10,7 @@ from database import get_db, init_db
 from schemas import QueryRequest, QueryResponse, DocumentResponse, ScanStatusResponse
 from services.rag_engine import RAGEngine
 from services.document_service import DocumentService
+from services.llm_factory import init_llama_index
 from config import settings
 
 app = FastAPI(title="SimpleRAG", version="1.0.0")
@@ -19,6 +20,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.on_event("startup")
 async def startup_event():
+    init_llama_index()
     await init_db()
 
 

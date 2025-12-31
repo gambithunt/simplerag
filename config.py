@@ -8,9 +8,10 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = "./chroma_db"
     upload_dir: str = "./uploads"
     scan_dir: str = "./documents_to_scan"
+    model_cache_dir: str = "./model_cache"
     
-    embedding_model: str = "all-MiniLM-L6-v2"
-    chunk_size: int = 500
+    embedding_model: str = "BAAI/bge-large-en-v1.5"
+    chunk_size: int = 512
     chunk_overlap: int = 50
     
     ollama_base_url: str = "http://localhost:11434"
@@ -29,3 +30,4 @@ settings = Settings()
 Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
 Path(settings.scan_dir).mkdir(parents=True, exist_ok=True)
 Path(settings.chroma_persist_dir).mkdir(parents=True, exist_ok=True)
+Path(settings.model_cache_dir).mkdir(parents=True, exist_ok=True)

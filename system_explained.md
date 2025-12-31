@@ -13,7 +13,7 @@
 
 ## Step 1: High-Level Overview
 
-SimpleRAG is a **Local RAG (Retrieval-Augmented Generation)** system.
+SimpleRAG is a **Local RAG (Retrieval-Augmented Generation)** system built with **LlamaIndex**.
 
 **The Goal:** You upload a document (PDF, Word, etc.), and then you can ask an AI questions about it. The AI answers _only_ using the information from your documents.
 
@@ -23,29 +23,30 @@ The entire system runs on three main "computers" (containers) defined in `docker
 
 1.  **`postgres`**:
     - **Role**: The "Librarian's Notebook".
-    - **What it stores**: Metadata. "File X was uploaded on Tuesday", "File Y has ID 5". It does _not_ store the vector embeddings or the AI model.
+    - **What it stores**: Document metadata. "File X was uploaded on Tuesday", "File Y has ID 5". It does _not_ store the vector embeddings, chunks, or the AI model.
 2.  **`ollama`**:
     - **Role**: The "Brain".
-    - **What it does**: It runs the Large Language Model (like Llama 2 or Mistral). It takes text and generates answers. It exposes an API on port `11434`.
+    - **What it does**: It runs the Large Language Model (like Llama 2). It takes text and generates answers. It exposes an API on port `11434`.
 3.  **`app`**:
     - **Role**: The "Coordinator" (Your Code).
-    - **What it does**: This is the FastAPI Python application. It talks to the user (Frontend), talks to Postgres (to save metadata), talks to ChromaDB (to save vectors), and talks to Ollama (to get answers).
+    - **What it does**: This is the FastAPI Python application using LlamaIndex. It talks to the user (Frontend), talks to Postgres (to save metadata), talks to ChromaDB (to save vectors), and talks to Ollama (to get answers).
 
 ### Key Data Volumes (Folders)
 
-The `app` container has access to three special folders on your hard drive:
+The `app` container has access to four special folders on your hard drive:
 
 - `uploads/`: Where files uploaded via the web UI are saved.
 - `documents_to_scan/`: A "drop folder". If you manually paste a file here, the system can scan and ingest it automatically.
 - `chroma_db/`: This is where the **Vector Database** lives. Unlike Postgres, ChromaDB is running _inside_ your Python app (embedded), but it saves its data here so it survives restarts.
+- `model_cache/`: Caches the downloaded HuggingFace embedding model (BAAI/bge-large-en-v1.5) for faster startups.
 
 ### The Flow
 
 1.  **User** -> Uploads PDF -> **App** saves to `uploads/`.
-2.  **App** -> Reads PDF -> Extracts Text -> Turns text into Numbers (Vectors).
-3.  **App** -> Saves Vectors to `chroma_db/` and Metadata to `postgres`.
-4.  **User** -> Asks Question -> **App** searches `chroma_db/` for relevant text.
-5.  **App** -> Sends Question + Relevant Text to **Ollama**.
+2.  **App** -> Uses LlamaIndex SimpleDirectoryReader -> Extracts Text -> Automatically chunks and embeds it.
+3.  **App** -> LlamaIndex stores Vectors in `chroma_db/` and metadata in PostgreSQL.
+4.  **User** -> Asks Question -> **App** uses LlamaIndex QueryEngine to search `chroma_db/`.
+5.  **App** -> LlamaIndex sends Question + Relevant Text to **Ollama**.
 6.  **Ollama** -> Generates Answer -> **App** sends answer to User
 
 ---
@@ -100,132 +101,117 @@ async def query_documents(request: QueryRequest, ...): # 1. Receives your questi
 
 ## Step 3: Document Ingestion (The "R" in RAG - Part 1)
 
-This is where the magic begins. How do we turn a PDF into something an AI can understand?
+This is where the magic begins. How do we turn a PDF into something an AI can understand? We use **LlamaIndex** for this.
 
 ### The Orchestrator: `DocumentService`
-Located in `services/document_service.py`, this class manages the entire lifecycle of a document.
+Located in `services/document_service.py`, this class manages the entire lifecycle of a document using LlamaIndex.
 
-**The `process_and_store_document` method does 4 things:**
-1.  **Extract Text**: Calls `DocumentProcessor` to pull raw text from the file.
-2.  **Save to Postgres**: Creates a `Document` record (filename, size, etc.) in the SQL database.
-3.  **Chunking**: Splits the massive text into smaller pieces (e.g., 500 words each).
-4.  **Vectorize**: Sends these chunks to `VectorStore` (ChromaDB) to be turned into numbers.
+**The `process_and_store_document` method does 3 things:**
+1.  **Extract Text**: Uses LlamaIndex's `SimpleDirectoryReader` to intelligently extract text from any supported file format (PDF, DOCX, TXT, etc.).
+2.  **Save Metadata to Postgres**: Creates a `Document` record (filename, size, etc.) in the SQL database for tracking.
+3.  **Index with LlamaIndex**: Uses `VectorStoreIndex.from_documents()` which automatically:
+    - Chunks the text into optimal sizes (configured in `config.py`)
+    - Generates embeddings using the configured embedding model
+    - Stores everything in ChromaDB with proper metadata
 
-### The Worker: `DocumentProcessor`
-Located in `services/document_processor.py`, this is a utility class that knows how to read different file formats.
+### LlamaIndex's SimpleDirectoryReader
+No need for manual format handling! LlamaIndex automatically detects and processes:
+*   **PDF**: Extracts text and preserves structure
+*   **DOCX**: Reads paragraphs and formatting
+*   **Excel**: Converts tables to readable format
+*   **Text/MD**: Direct ingestion
 
-**1. Text Extraction**
-It switches logic based on file extension:
-*   **PDF**: Uses `PyPDF2` to read page by page.
-*   **DOCX**: Uses `python-docx` to read paragraphs.
-*   **Excel**: Uses `openpyxl` to read rows and joins cells with `|`.
-*   **Text/MD**: Reads directly.
-
-**2. Chunking (Crucial Concept)**
-AI models have a limit on how much text they can read at once (Context Window). We cannot feed a 100-page PDF into Llama 2 in one go.
-*   **The Solution**: We break the text into "Chunks".
-*   **The Code**: `chunk_text` method splits text into groups of words (defined in `config.py`, usually ~500 words) with a small "overlap" (e.g., 50 words) to ensure context isn't lost between cuts.
+### Chunking (Handled by LlamaIndex)
+AI models have a limit on how much text they can read at once (Context Window). LlamaIndex handles this intelligently:
+*   **Automatic Chunking**: Text is split into pieces based on `chunk_size` in `config.py` (default: 512 tokens)
+*   **Smart Overlap**: Uses `chunk_overlap` to maintain context between chunks
+*   **No Manual Work**: All chunking logic is handled by LlamaIndex's node parser
 
 ### The "Scan Folder" Feature
 There is a special method `scan_folder` in `DocumentService`.
 *   It looks at the `documents_to_scan/` directory.
-*   If it finds a file that isn't in the database yet, it automatically moves it to `uploads/` and triggers the processing pipeline.
+*   If it finds a file that isn't in the database yet, it automatically moves it to `uploads/` and triggers the LlamaIndex processing pipeline.
 *   This is great for bulk-importing documents without using the UI.
 
 ---
 
-## Step 4: Vector Storage (The "R" in RAG - Part 2)
+## Step 4: Vector Storage & Embeddings (The "R" in RAG - Part 2)
 
-We have text chunks. Now we need to make them searchable by *meaning*, not just by keywords. This is where **Embeddings** and **ChromaDB** come in.
+We have text chunks. Now we need to make them searchable by *meaning*, not just by keywords. This is where **Embeddings** and **ChromaDB** come in, all managed by LlamaIndex.
 
 ### The Concept: Embeddings
 Computers don't understand "The cat sat on the mat". They understand numbers.
-*   **Embedding Model**: A small AI model (specifically `all-MiniLM-L6-v2` in this project) that reads text and outputs a list of 384 numbers (a vector).
+*   **Embedding Model**: We use `BAAI/bge-large-en-v1.5`, a powerful embedding model optimized for accuracy on systems with 24GB RAM.
 *   **Magic**: Sentences with similar meanings get similar numbers. "Hello" and "Hi" will be mathematically close. "Hello" and "Banana" will be far apart.
 
-### The Manager: `VectorStore`
-Located in `services/vector_store.py`, this class wraps ChromaDB.
+### LlamaIndex + ChromaDB Integration
+The system uses LlamaIndex's `ChromaVectorStore` wrapper:
+*   **Initialization**: `services/document_service.py` sets up the connection to ChromaDB
+*   **Automatic Embedding**: When documents are indexed, LlamaIndex automatically generates embeddings
+*   **Persistent Storage**: All vectors and metadata are stored in `chroma_db/` directory
 
-**1. Initialization**
+### Global Configuration: `llm_factory.py`
+This is the central configuration point:
 ```python
-self.client = chromadb.Client(...)
-self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-````
-
-**2. Upserting Vectors (The "Store" part)**
-
-```python
-def upsert(self, document_id: str, text: str, metadata: dict):
-    # 1. Embeds the text using the embedding model
-    # 2. Upserts the vector into ChromaDB with associated metadata
+Settings.llm = Ollama(...)  # Configure Ollama LLM
+Settings.embed_model = resolve_embed_model("local:BAAI/bge-large-en-v1.5")  # Configure embeddings
+Settings.chunk_size = 512  # Optimal chunk size
+Settings.chunk_overlap = 50  # Context preservation
 ```
 
-**3. Querying Vectors (The "Retrieve" part)**
-
-```python
-def query(self, query_text: str, top_k: int = 5):
-    # 1. Embeds the query text
-    # 2. Searches ChromaDB for the top_k most similar vectors
-    # 3. Returns the associated metadata
-```
+All LlamaIndex operations use these global settings, ensuring consistency across the application.
 
 ---
 
 ## Step 5: The RAG Engine (The "G" in RAG)
 
-This is the brain of the operation. It combines the search results (Retrieval) with the LLM (Generation) to give you a coherent answer.
+This is the brain of the operation. It combines the search results (Retrieval) with the LLM (Generation) using **LlamaIndex's QueryEngine**.
 
 ### The Orchestrator: `RAGEngine`
 
-Located in `services/rag_engine.py`, this class ties everything together.
+Located in `services/rag_engine.py`, this class uses LlamaIndex to handle the complete RAG pipeline.
 
 **The `query` method workflow:**
 
-1.  **Retrieve (`self.vector_store.search`)**:
+1.  **Initialize QueryEngine**:
+    - Creates a `VectorStoreIndex` from the existing ChromaDB collection
+    - Converts it to a `QueryEngine` with `index.as_query_engine(similarity_top_k=top_k)`
+    - LlamaIndex handles all the complex retrieval and generation logic
 
-    - It takes your question ("How do I reset my password?").
-    - It asks ChromaDB for the top 5 most relevant text chunks.
-    - _Result_: A list of raw text snippets from your PDF.
+2.  **Query Execution**:
+    - Simply calls `response = query_engine.query(question)`
+    - LlamaIndex automatically:
+      - Embeds the question
+      - Searches ChromaDB for relevant chunks
+      - Constructs an optimal prompt
+      - Sends it to Ollama (configured in `llm_factory.py`)
+      - Generates a coherent answer
 
-2.  **Augment (Building the Context)**:
-
-    - It loops through the search results.
-    - It fetches the filename from Postgres (so it can say "Source: Manual.pdf").
-    - It constructs a big string called `context` that looks like this:
-
-      ```text
-      Document: Manual.pdf
-
-      To reset your password, go to settings...
-
-      Document: Policy.docx
-      Passwords must be 8 characters...
-      ```
-
-3.  **Generate (`_generate_answer`)**:
-
-    - It constructs a **Prompt** for the LLM:
-
-      ```text
-      You are a helpful assistant. Answer the question based on the context provided.
-
-      Context:
-      [The big string from step 2]
-
-      Question: How do I reset my password?
-      ```
-
-    - It sends this prompt to **Ollama** (running in the other Docker container) via HTTP POST.
+3.  **Extract Sources**:
+    - Loop through `response.source_nodes`
+    - Each node contains:
+      - `node.text`: The relevant chunk text
+      - `node.metadata`: Document ID, filename, etc.
+      - `node.score`: Relevance score for ranking
 
 4.  **Audit**:
-    - It saves the query and response time to the `query_audit_logs` table in Postgres. This is useful for seeing what users are asking.
+    - Saves the query and response time to `query_audit_logs` table in Postgres
+    - Tracks which documents were accessed for the answer
 
-### The LLM Connection
+### The LlamaIndex Advantage
 
-- **Tool**: `httpx` (an async HTTP client).
-- **Endpoint**: `http://ollama:11434/api/generate`.
-- **Model**: Defined in `config.py` (default: `llama2`).
-- **Fallback**: If Ollama is down, the code catches the error and returns the raw context snippets instead, so the user still gets _some_ information.
+Previously, we manually:
+- Built prompts
+- Called Ollama via HTTP
+- Handled errors and fallbacks
+
+Now LlamaIndex:
+- Automatically constructs optimal prompts
+- Manages LLM communication
+- Handles retries and error cases
+- Provides better context management
+
+All configuration happens once in `llm_factory.py`, and every query benefits from it.
 
 ---
 
@@ -243,11 +229,13 @@ We use **SQLAlchemy** to define our Postgres tables.
     - Stores `filename`, `file_path`, `file_size_bytes`, and `metadata_json`.
     - Has an `is_active` flag (Soft Delete). When you delete a file, we just set this to `False` instead of destroying the record immediately.
 
-2.  **`DocumentChunk`**:
+2.  **`QueryAuditLog`**:
 
-    - Stores the actual text pieces.
-    - Linked to `Document` via `document_id`.
-    - _Note_: We store the text here _and_ in ChromaDB. Why? ChromaDB is for searching, Postgres is for reliable storage and display.
+    - Tracks every query made to the system.
+    - Stores the question, response time, and which documents were accessed.
+    - Useful for analytics and debugging.
+
+**Note**: The `DocumentChunk` table has been removed. Chunking and storage are now fully handled by LlamaIndex and ChromaDB, which is more efficient and reduces database complexity.
 
 3.  **`QueryAuditLog`**:
     - A history of every question asked.
@@ -283,3 +271,75 @@ You now understand the full lifecycle of SimpleRAG:
 
 - Try uploading a document and watching the logs (`make logs-app`) to see the chunking happen in real-time.
 - Look at `services/rag_engine.py` and try changing the prompt to give the AI a different personality!
+
+# Connection to db
+
+Fill in these details:
+Host name/address: localhost
+Port: 5432
+Maintenance database: app_db
+Username: postgres
+Password: postgres
+
+What You'll See:
+
+Once connected, expand the tree:
+Servers
+└── AI RAG System
+└── Databases
+└── app_db
+└── Schemas
+└── public
+└── Tables
+├── alembic_version
+├── document_chunks
+└── documents
+
+---
+
+Useful Queries to Run:
+
+View All Documents
+
+Right-click on documents table → View/Edit Data → All Rows
+
+Or use the Query Tool:
+SELECT id, original_filename, file_type, status, chunk_count, created_at
+FROM documents
+ORDER BY created_at DESC;
+
+View Document Chunks
+
+SELECT dc.id, dc.document_id, d.original_filename, dc.chunk_index,
+LEFT(dc.chunk_text, 100) as chunk_preview
+FROM document_chunks dc
+JOIN documents d ON d.id = dc.document_id
+ORDER BY dc.document_id, dc.chunk_index;
+
+Count Documents by Status
+
+SELECT status, COUNT(\*) as count
+FROM documents
+GROUP BY status;
+
+Find Stuck Documents
+
+SELECT id, original_filename, status,
+NOW() - created_at as age
+FROM documents
+WHERE status = 'processing'
+AND created_at < NOW() - INTERVAL '5 minutes';
+
+---
+
+# Quick & Free:
+
+## Connect to database
+
+docker exec -it airag_postgres psql -U postgres -d app_db
+
+# Once connected, useful commands:
+
+\dt # List all tables
+\d documents # Describe documents table
+\q # Quit

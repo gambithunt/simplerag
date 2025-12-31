@@ -20,21 +20,6 @@ CREATE INDEX IF NOT EXISTS idx_documents_department ON documents(department);
 CREATE INDEX IF NOT EXISTS idx_documents_active ON documents(is_active);
 CREATE INDEX IF NOT EXISTS idx_documents_metadata ON documents USING gin(metadata_json);
 
-CREATE TABLE IF NOT EXISTS document_chunks (
-    id SERIAL PRIMARY KEY,
-    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    chunk_index INTEGER NOT NULL,
-    text TEXT NOT NULL,
-    word_count INTEGER,
-    classification VARCHAR(50) DEFAULT 'internal',
-    metadata_json JSONB,
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(document_id, chunk_index)
-);
-
-CREATE INDEX IF NOT EXISTS idx_chunks_document ON document_chunks(document_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_classification ON document_chunks(classification);
-
 CREATE TABLE IF NOT EXISTS query_audit_log (
     id SERIAL PRIMARY KEY,
     query TEXT NOT NULL,

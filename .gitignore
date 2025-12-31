@@ -33,3 +33,4 @@ backup*.sql
 !uploads/.gitkeep
 !documents_to_scan/.gitkeep
 !chroma_db/.gitkeep
+model_cache/

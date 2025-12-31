@@ -4,17 +4,20 @@ from pathlib import Path
 from typing import List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from models import Document, DocumentChunk
+import chromadb
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageContext
+from llama_index.vector_stores.chroma import ChromaVectorStore
+from models import Document
 from schemas import DocumentCreate
-from services.document_processor import DocumentProcessor
-from services.vector_store import VectorStore
 from config import settings
 
 
 class DocumentService:
     def __init__(self):
-        self.processor = DocumentProcessor()
-        self.vector_store = VectorStore()
+        db = chromadb.PersistentClient(path=settings.chroma_persist_dir)
+        chroma_collection = db.get_or_create_collection("documents")
+        self.vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+        self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
     
     async def process_and_store_document(
         self, 
@@ -24,41 +27,42 @@ class DocumentService:
         department: str,
         db: AsyncSession
     ) -> Document:
-        text = await self.processor.extract_text(file_path)
+        documents = SimpleDirectoryReader(input_files=[file_path]).load_data()
         
-        metadata = self.processor.get_file_metadata(file_path)
+        if not documents:
+            raise ValueError("Failed to extract content from document")
+        
+        text_content = "\n\n".join([doc.text for doc in documents])
+        file_stat = os.stat(file_path)
+        file_ext = Path(file_path).suffix
         
         doc_data = DocumentCreate(
             filename=filename,
             file_path=file_path,
-            file_type=metadata['extension'],
-            file_size_bytes=metadata['size'],
+            file_type=file_ext,
+            file_size_bytes=file_stat.st_size,
             classification=classification,
             department=department,
-            content_preview=text[:500] if text else None,
-            metadata_json=metadata
+            content_preview=text_content[:500] if text_content else None,
+            metadata_json={"file_extension": file_ext, "size": file_stat.st_size}
         )
         
         db_document = Document(**doc_data.model_dump())
         db.add(db_document)
         await db.flush()
         
-        chunks = self.processor.chunk_text(text)
+        for doc in documents:
+            doc.metadata["document_id"] = db_document.id
+            doc.metadata["filename"] = filename
+            doc.metadata["classification"] = classification
         
-        for idx, chunk in enumerate(chunks):
-            db_chunk = DocumentChunk(
-                document_id=db_document.id,
-                chunk_index=idx,
-                text=chunk,
-                word_count=len(chunk.split()),
-                classification=classification
-            )
-            db.add(db_chunk)
+        VectorStoreIndex.from_documents(
+            documents,
+            storage_context=self.storage_context
+        )
         
         await db.commit()
         await db.refresh(db_document)
-        
-        await self.vector_store.add_chunks(chunks, db_document.id)
         
         return db_document
     
@@ -124,6 +128,13 @@ class DocumentService:
         document.is_active = False
         await db.commit()
         
-        await self.vector_store.delete_document(document_id)
+        try:
+            chroma_db = chromadb.PersistentClient(path=settings.chroma_persist_dir)
+            collection = chroma_db.get_collection("documents")
+            results = collection.get(where={"document_id": document_id})
+            if results['ids']:
+                collection.delete(ids=results['ids'])
+        except Exception:
+            pass
         
         return True
