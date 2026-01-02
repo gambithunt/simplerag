@@ -343,3 +343,4 @@ docker exec -it airag_postgres psql -U postgres -d app_db
 \dt # List all tables
 \d documents # Describe documents table
 \q # Quit
+````
